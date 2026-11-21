@@ -1,0 +1,12 @@
+/data/
+/mods/
+/runtime/
+/build/out/
+/WeaponPaintTool.exe
+/app/desktop/*.dll
+/app/engine/*.exe
+/app/assets/stock_previews.zip
+__pycache__/
+*.py[cod]
+*.hd2project
+*.hd2assets

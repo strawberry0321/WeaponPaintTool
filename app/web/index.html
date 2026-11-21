@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WeaponPaintTool 测试版</title>
+  <link rel="icon" href="favicon.ico">
+  <link rel="stylesheet" href="studio.css">
+  <script type="importmap">{"imports":{"three":"./vendor/three.module.js"}}</script>
+  <script type="module" src="studio.js"></script>
+</head>
+<body>
+  <section id="stock-screen" class="stock-screen" hidden aria-labelledby="stock-heading">
+    <div class="stock-panel">
+      <img src="app_icon.png" alt="" width="56" height="56">
+      <h1 id="stock-heading">WeaponPaintTool</h1>
+      <p>首次使用请选择 Helldivers 2 安装目录。工具会准备模型和原装材质预览。</p>
+      <button id="choose-stock" class="primary">选择游戏目录</button>
+      <p id="stock-status" class="subtle" aria-live="polite"></p>
+    </div>
+  </section>
+  <main class="workspace">
+    <aside class="catalog-panel">
+      <header class="app-header">
+        <img src="app_icon.png" alt="" class="app-icon">
+        <strong>武器涂装工具</strong><span class="app-version">1.7.3 测试版</span>
+      </header>
+      <details class="project-menu">
+        <summary>工程<span id="save-state">准备中</span></summary>
+        <div class="section-content">
+          <label class="field">工程名称<input id="project-name" value="我的武器涂装"></label>
+          <div class="button-row"><button id="new-project">新建</button><button id="open-project">打开</button><button id="save-project">保存</button></div>
+          <div class="button-row"><button id="undo" title="撤销 Ctrl+Z">撤销</button><button id="redo" title="重做 Ctrl+Y">重做</button><button id="assets">资产</button></div>
+        </div>
+      </details>
+      <div class="catalog-heading"><h2>武器库</h2><span id="catalog-count"></span></div>
+      <div id="categories" class="categories" role="tablist" aria-label="武器分类"></div>
+      <div class="search-field"><input id="search" type="search" placeholder="搜索名称或编号" aria-label="搜索武器"></div>
+      <div id="weapon-list" class="weapon-list" aria-label="武器列表"></div>
+    </aside>
+    <section class="workbench" aria-label="模型工作区">
+      <div class="workspace-toolbar" aria-label="画笔与视角">
+        <div class="tool-group">
+          <button data-tool="select" class="active" title="拖动旋转，单击选择部件 V">视角</button>
+          <button data-tool="paint" title="点击开关画笔，或按住 B 临时涂色" aria-pressed="false">画笔</button>
+          <button id="paint-emission" data-tool="lightPaint" aria-pressed="false">发光笔</button>
+          <button id="clear-selection">清除所选</button>
+        </div>
+        <div class="tool-group view-tools"><button id="fit" title="适应模型 F">适应视图</button><button id="front">右侧</button><button id="back">左侧</button><button id="rear">枪尾</button></div>
+      </div>
+      <div id="brush-controls" class="brush-options" hidden aria-label="当前画笔设置">
+        <label>笔形<select id="brush-shape"><option value="freehand">自由</option><option value="line">直线</option><option value="curve">曲线</option><option value="circle">圆圈</option></select></label>
+        <label class="brush-color"><span>颜色</span><input id="paint-color" type="color" value="#e01a1a" aria-label="画笔颜色"><input id="paint-hex" value="#e01a1a" aria-label="画笔十六进制颜色" maxlength="7"></label>
+        <label id="brush-light-color" class="brush-color" hidden>颜色<input id="paint-light-color" type="color" value="#49b2ff" aria-label="发光笔颜色"></label>
+        <label class="brush-size">大小<input id="brush-size" type="number" min="0.5" max="60" step="0.5" value="8" aria-label="画笔半径">mm</label>
+        <label class="brush-opacity">不透明度<input id="brush-opacity" type="range" min="1" max="100" value="100"><output id="brush-opacity-value">100%</output></label>
+      </div>
+      <div class="viewport" id="viewport">
+        <div class="model-heading"><h1 id="weapon-title">正在载入武器</h1><p id="mesh-info"></p><span id="weapon-native" hidden></span></div>
+        <canvas id="scene" aria-label="武器三维工作台"></canvas>
+        <canvas id="brush-guide" aria-hidden="true" hidden></canvas>
+        <div id="brush-cursor" hidden></div>
+        <canvas id="decal-guides" aria-hidden="true"></canvas>
+        <div id="decal-handles" hidden>
+          <button data-handle="nw" class="decal-handle" aria-label="左上角"></button><button data-handle="ne" class="decal-handle" aria-label="右上角"></button>
+          <button data-handle="se" class="decal-handle" aria-label="右下角"></button><button data-handle="sw" class="decal-handle" aria-label="左下角"></button>
+          <button data-handle="rotate" class="decal-handle rotate-handle" aria-label="旋转贴花">↻</button>
+        </div>
+        <div id="decal-actions" class="decal-actions" hidden><span id="decal-action-name">贴花</span><label class="depth-control">覆盖深度<input id="decal-depth" type="number" min="0.1" max="2000" step="0.5" value="4" aria-label="贴花从外向内的覆盖深度（毫米）" title="从所选部件的最外侧向内覆盖">mm</label><label class="wrap-control" title="勾选后覆盖投影范围内的全部朝向，普通单面贴花可取消勾选"><input id="decal-fullwrap" type="checkbox" checked>覆盖全部朝向</label><button id="copy-to-back">复制到背面</button><button id="crop-image">裁剪</button><button id="finish-image">完成</button></div>
+        <div class="assembly-drawer">
+          <button id="assembly-toggle" class="drawer-toggle" aria-expanded="false" aria-controls="assembly-content"><span>装配</span><span id="assembly-arrow">‹</span></button>
+          <div id="assembly-content" class="drawer-content" hidden>
+            <details class="control-section" open><summary>配件</summary><div class="section-content"><div id="attachments" class="attachments"></div></div></details>
+
+            <details class="control-section" open><summary>部件、配色与可见性</summary><div id="color-panel" class="section-content">
+              <div class="button-row"><button id="restore-color">还原部件配色</button><button id="add-emission">部件发光</button></div>
+              <div class="button-row"><button id="explode">拆解部件</button><button id="restore-selected" disabled>归位所选</button></div>
+              <div class="button-row"><button id="isolate">仅显示所选</button><button id="show-all">显示全部</button></div><div id="components" class="components"></div>
+            </div></details>
+          </div>
+        </div>
+        <div class="workspace-caption"><span id="viewport-hint">拖动旋转 · 单击选择部件 · Ctrl 多选 · 按住 B 临时画笔</span></div>
+        <div id="loading" class="loading"><span class="spinner"></span><span id="loading-text">正在准备模型</span></div>
+      </div>
+      <div class="paint-toolbar">
+        <div class="paint-actions">
+          <button id="import-image" class="primary">添加贴花</button><button id="import-rear">枪尾贴花</button><button id="import-cylinder">曲面环绕</button><button id="add-text">文字</button>
+          <label class="paint-range">范围<select id="paint-scope" aria-label="修改目标"><option value="selection">所选部件</option><option value="assembly">枪身与配件</option></select></label>
+        </div>
+      </div>
+    </section>
+    <aside class="inspector-panel" aria-label="图层与属性">
+      <div class="inspector-tabs" role="tablist" aria-label="编辑分类"><button role="tab" data-inspector="layers" class="active">图层</button><button role="tab" data-inspector="materials">素材</button></div>
+      <div id="layers-panel" class="inspector-tab-content">
+        <section class="layer-stack" aria-label="图层列表"><div id="layers" class="layers"></div></section>
+        <section id="layer-properties" class="inspector-section layer-properties" aria-label="所选图层属性" hidden>
+          <header class="layer-property-header"><h2 id="layer-property-name"></h2><p id="layer-property-target"></p></header>
+          <div id="layer-light-host" hidden></div>
+          <div id="decal-properties" hidden>
+            <button id="edit-light-regions" class="property-action">编辑图片发光 <span aria-hidden="true">›</span></button>
+            <details class="property-disclosure"><summary>位置与投射</summary>
+            <div id="decal-settings">
+            <label class="field">贴花投射<select id="decal-projection"><option value="plane">侧面贴花</option><option value="end">端面贴花</option><option value="cylinder">曲面环绕</option></select></label>
+            <label class="field">贴花方向<select id="decal-side"><option value="view" disabled>已保存方向</option><option value="front">右侧</option><option value="back">左侧</option><option value="rear">枪尾</option><option value="muzzle">枪口端</option><option value="top">顶部</option><option value="bottom">底部</option></select></label>
+            <div class="input-pair"><label class="field">旋转角度<input id="decal-angle" type="number" step="1" value="0"></label><label class="field">缩放<input id="decal-scale" type="number" min="0.01" max="50" step="0.05" value="1"></label></div>
+            <div class="input-pair"><label class="field">水平位移（mm）<input id="decal-x" type="number" step="0.5" value="0"></label><label class="field">垂直位移（mm）<input id="decal-y" type="number" step="0.5" value="0"></label></div>
+            <div id="cylinder-settings" hidden>
+              <div class="input-pair"><label class="field">环绕轴<select id="decal-axis"><option value="auto">自动</option><option value="0">X（枪身方向）</option><option value="1">Y（横向）</option><option value="2">Z（竖向）</option></select></label><label class="field">覆盖角度<input id="decal-wrap" type="number" min="1" max="360" step="1" value="360"></label></div>
+              <label class="field">覆盖高度（mm）<input id="decal-wrap-height" type="number" min="0.1" step="0.5"></label>
+            </div>
+            </div></details>
+          </div>
+        </section>
+      </div>
+      <section id="materials-panel" class="inspector-tab-content materials-section" hidden><header class="material-heading"><h2>图片素材</h2><button id="import-library">导入素材</button></header><div id="image-library" class="image-library"></div></section>
+      <template id="light-template">
+          <div id="light-controls" class="light-controls">
+            <div class="input-pair">
+              <label id="light-color-field" class="field">发光颜色<input id="emission-color" type="color" value="#a4c8ff"></label>
+              <label class="field">效果<select id="emission-effect"><option value="static">常亮</option><option value="breathe">呼吸</option><option value="flow">流光</option></select></label>
+            </div>
+            <label id="light-strength-field" class="field">亮度<input id="emission-strength" type="number" min="0" max="50" step=".1" value="3"></label>
+            <div id="breathe-controls" class="light-effect-controls" hidden>
+              <div class="input-pair"><label class="field">最低亮度<input id="light-minimum" type="number" min="0" max="50" step=".1" value=".2"></label><label class="field">最高亮度<input id="light-maximum" type="number" min="0" max="50" step=".1" value="3"></label></div>
+              <label class="field">周期（秒）<input id="light-period" type="number" min=".1" max="60" step=".1" value="3"></label>
+            </div>
+            <div id="flow-controls" class="light-effect-controls" hidden>
+              <div class="input-pair"><label class="field">速度（次/秒）<input id="light-speed" type="number" min=".05" max="20" step=".05" value=".6"></label><label class="field">光带长度（%）<input id="light-width" type="number" min="1" max="100" step="1" value="25"></label></div>
+              <label class="field">方向<select id="light-direction"><option value="frontToBack">枪口 → 枪尾</option><option value="backToFront">枪尾 → 枪口</option></select></label>
+            </div>
+          </div>
+      </template>
+      <div class="export-bar"><button id="export" class="primary export-button">导出当前武器</button><span>保存至程序目录的 mods 文件夹</span></div>
+    </aside>
+  </main>
+  <footer class="status-bar"><span id="status">正在准备工作台</span><span id="job-status"></span><span class="author-watermark">
+    <a id="author-bilibili" href="https://space.bilibili.com/437268141" target="_blank" rel="noopener noreferrer">B站 · StarAiri</a>
+    <a id="author-github" href="https://github.com/strawberry0321/WeaponPaintTool" target="_blank" rel="noopener noreferrer">GitHub · strawberry0321</a>
+  </span></footer>
+  <input type="file" id="library-input" accept="image/*" hidden multiple>
+  <input type="file" id="image-input" accept="image/*" hidden multiple>
+  <input type="file" id="project-input" accept=".hd2project" hidden>
+  <input type="file" id="mask-input" accept="image/png,image/jpeg" hidden>
+  <input type="file" id="pack-input" accept=".zip,.hd2assets" hidden>
+  <dialog id="export-dialog" class="export-dialog">
+    <form method="dialog" class="dialog-header"><h2>当前武器</h2><button aria-label="关闭">×</button></form>
+    <div class="dialog-content">
+      <div id="export-plan" class="export-plan"></div>
+      <div class="export-options">
+        <label class="field">安装包名称<input id="export-name" type="text" maxlength="90" required></label>
+        <label><input id="export-include-project" type="checkbox">附带可编辑工程（供下次导入工作台）</label>
+        <p class="subtle">工程含素材与模型资源，会增加安装包体积。</p>
+      </div>
+      <div id="export-progress" hidden><progress id="job-progress" max="1" value="0"></progress><p id="job-message"></p><span id="job-elapsed" class="subtle"></span></div>
+      <div id="export-result"></div>
+    </div>
+    <div class="dialog-footer"><button id="cancel-export" hidden>取消导出</button><button id="start-export" class="primary">生成安装包</button></div>
+  </dialog>
+  <dialog id="open-dialog"><form method="dialog" class="dialog-header"><h2>打开工程</h2><button aria-label="关闭">×</button></form><div id="saved-projects" class="dialog-content"></div><div class="dialog-footer"><button id="browse-project" class="primary">从文件打开</button></div></dialog>
+  <dialog id="text-dialog"><form method="dialog" class="dialog-header"><h2>添加文字</h2><button aria-label="关闭">×</button></form><div class="dialog-content"><label class="field">文字<textarea id="text-content" rows="3">自由</textarea></label><label class="color-choice">文字颜色<input id="text-color" type="color" value="#ffffff"><input id="text-hex" value="#ffffff" maxlength="7" aria-label="文字十六进制颜色"></label></div><div class="dialog-footer"><button id="create-text" class="primary">生成文字图层</button></div></dialog>
+  <dialog id="mask-dialog" class="mask-dialog" aria-labelledby="mask-title">
+    <form method="dialog" class="dialog-header"><h2 id="mask-title">图片发光区域</h2><button aria-label="关闭">×</button></form>
+    <div class="mask-workspace">
+      <div class="mask-surface">
+        <div class="mask-toolbar"><button data-mask-tool="paint" class="active">画笔</button><button data-mask-tool="erase">擦除</button><button data-mask-tool="lasso">套索</button><label>大小<input id="mask-size" type="range" min="1" max="160" value="24"></label><button id="mask-undo">撤销</button></div>
+        <div id="mask-stage" class="mask-stage"><canvas id="mask-canvas" aria-label="在原图上绘制发光区域"></canvas></div>
+      </div>
+      <aside class="mask-regions" aria-label="发光区域属性">
+        <nav class="mask-tabs" aria-label="图片发光设置"><button data-mask-panel="regions" aria-pressed="true">区域</button><button data-mask-panel="effect" aria-pressed="false">效果</button></nav>
+        <div id="mask-region-settings" class="mask-settings">
+        <div id="mask-regions" class="mask-region-list" aria-label="图片发光区域"></div>
+        <div class="mask-actions"><button id="mask-add-region">新增</button><button id="mask-remove-region">删除</button></div>
+        <div class="input-pair"><label class="field">名称<input id="mask-region-name" maxlength="80"></label><label class="field region-color-field">颜色<input id="mask-region-color" type="color" value="#ffffff"></label></div>
+        <label><input id="mask-original-color" type="checkbox">混合原图色调</label>
+        <details class="property-disclosure"><summary>蒙版操作</summary><div class="mask-actions"><button id="mask-fill">填满</button><button id="mask-clear">清空</button></div><button id="import-mask">导入蒙版</button></details>
+        <label><input id="mask-original-view" type="checkbox">查看原图</label>
+        </div>
+        <div id="mask-effect-settings" class="mask-settings" hidden>
+          <label><input id="emission-enabled" type="checkbox">启用图片发光</label>
+          <div id="image-light-host"></div>
+        </div>
+      </aside>
+    </div>
+    <div class="dialog-footer"><span id="mask-status" class="subtle" role="status"></span><button id="save-mask" class="primary">应用发光区域</button></div>
+  </dialog>
+  <dialog id="assets-dialog"><form method="dialog" class="dialog-header"><h2>资产管理</h2><button aria-label="关闭">×</button></form><div class="dialog-content"><div id="asset-info"></div><button id="import-pack">导入资产版本</button><div id="migration-section" hidden><label class="field">部件迁移映射<textarea id="component-remap" rows="5">{}</textarea></label><button id="migrate-project">迁移并另存工程</button><pre id="migration-report"></pre></div></div></dialog>
+  <div id="context-menu" class="context-menu" role="menu" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
