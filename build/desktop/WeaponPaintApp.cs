@@ -18,9 +18,9 @@ using Microsoft.Web.WebView2.WinForms;
 
 [assembly: AssemblyTitle("WeaponPaintTool 测试版")]
 [assembly: AssemblyProduct("WeaponPaintTool")]
-[assembly: AssemblyVersion("1.7.3.0")]
-[assembly: AssemblyFileVersion("1.7.3.0")]
-[assembly: AssemblyInformationalVersion("1.7.3-beta.1")]
+[assembly: AssemblyVersion("1.7.4.0")]
+[assembly: AssemblyFileVersion("1.7.4.0")]
+[assembly: AssemblyInformationalVersion("1.7.4-beta.1")]
 
 internal static class Entry
 {
@@ -119,7 +119,7 @@ internal sealed class PaintWindow : Form
         install = installPath;
         data = dataPath;
         arguments = args;
-        Text = "WeaponPaintTool 1.7.3 测试版";
+        Text = "WeaponPaintTool 1.7.4 测试版";
         BackColor = Color.FromArgb(246, 245, 242);
         AutoScaleMode = AutoScaleMode.Dpi;
         StartPosition = FormStartPosition.CenterScreen;

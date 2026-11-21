@@ -21,7 +21,7 @@ from weapon_assets import explosion_layout
 
 APP = Path(__file__).resolve().parent
 INSTALL = APP.parent
-VERSION = "1.7.3-beta.1"
+VERSION = "1.7.4-beta.1"
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 FORMAT = "HD2WeaponPaintProject"
 SCHEMA_VERSION = 1

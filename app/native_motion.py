@@ -40,15 +40,17 @@ def settings_for_shader(settings):
 def atlas_for(surface):
     static = surface["emission"]
     moving = surface["animated"]
-    grid = 1 << math.ceil(math.log2(math.sqrt(len(moving) + 1)))
-    tile = min(static.shape[0], MAX_SIZE // grid)
+    slots = len(moving) + 1
+    columns = 1 << math.ceil(math.log2(math.sqrt(slots)))
+    rows = 1 << (math.ceil(slots / columns) - 1).bit_length()
+    tile = min(static.shape[0], MAX_SIZE // columns)
     if tile <= 2 * TILE_PAD:
         raise ValueError("同一绘制表面的动画图层超出原生纹理容量")
     inner = tile - TILE_PAD * 2
     strength = max(float(static.max()), *(float(image[..., :3].max()) for _, _, image in moving))
-    atlas = np.zeros((grid * tile, grid * tile, 4), dtype=np.float32)
+    atlas = np.zeros((rows * tile, columns * tile, 4), dtype=np.float32)
     for index, image in enumerate([static, *(pixels for _, _, pixels in moving)]):
-        x, y = (index % grid) * tile, (index // grid) * tile
+        x, y = (index % columns) * tile, (index // columns) * tile
         channels = [np.asarray(Image.fromarray(np.ascontiguousarray(image[..., channel], dtype=np.float32)).resize(
             (inner, inner), Image.Resampling.BILINEAR)) for channel in range(image.shape[2])]
         if len(channels) == 3:
@@ -57,7 +59,8 @@ def atlas_for(surface):
         interior[..., :3] /= strength
         atlas[y:y + tile, x:x + tile] = np.pad(interior, ((TILE_PAD, TILE_PAD), (TILE_PAD, TILE_PAD), (0, 0)), mode="wrap")
     profile = tuple(settings_for_shader(settings) for _, settings, _ in moving)
-    return atlas, strength, (grid, tile, profile)
+    recipe = (columns, tile, profile) if rows == columns else (columns, rows, tile, profile)
+    return atlas, strength, recipe
 
 
 def _float(value):
@@ -65,8 +68,14 @@ def _float(value):
 
 
 def atlas_shader(recipe, gameplay):
-    grid, tile, effects = recipe
-    uv_scale = _float((tile - 2 * TILE_PAD) / (grid * tile))
+    if len(recipe) == 3:
+        rows, tile, effects = recipe
+        columns = rows
+    else:
+        columns, rows, tile, effects = recipe
+    uv_scale = _float((tile - 2 * TILE_PAD) / (columns * tile))
+    if rows != columns:
+        uv_scale = f"float2({uv_scale}, {_float((tile - 2 * TILE_PAD) / (rows * tile))})"
     lines = [
         "Texture2D<float4> atlas : register(t0);",
         "SamplerState surfaceSampler : register(s0);",
@@ -76,8 +85,8 @@ def atlas_shader(recipe, gameplay):
         f"    float2 dy = ddy(source.xy) * {uv_scale};",
     ]
     for i in range(len(effects) + 1):
-        u = _float((i % grid + TILE_PAD / tile) / grid)
-        v = _float((i // grid + TILE_PAD / tile) / grid)
+        u = _float((i % columns + TILE_PAD / tile) / columns)
+        v = _float((i // columns + TILE_PAD / tile) / rows)
         lines.append(f"    float4 s{i} = atlas.SampleGrad(surfaceSampler, uv + float2({u}, {v}), dx, dy);")
     lines.append("    float3 result = s0.rgb;")
     for i, values in enumerate(effects, 1):

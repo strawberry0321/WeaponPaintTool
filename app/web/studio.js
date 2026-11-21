@@ -1781,7 +1781,6 @@ async function updateExportPlan() {
   if (plan.sharedImpact.length > 1) html += '<details><summary>共享资源使用范围</summary><p>外观替换会作用于使用同一资源的装备。</p><p>' + plan.sharedImpact.map(row => escapeHTML(row.label)).join('、') + '</p></details>';
   $('#export-plan').innerHTML = html;
   $('#start-export').disabled = !plan.canExport || Boolean(state.jobId);
-  $('#export-include-project').disabled = Boolean(state.jobId);
   $('#export-name').disabled = Boolean(state.jobId);
   return plan;
 }
@@ -1861,7 +1860,6 @@ async function pollJob() {
   $('#job-elapsed').textContent = `已用 ${Math.floor(job.elapsedSeconds)} 秒`;
   $('#job-status').textContent = job.state === 'running' ? job.message : '';
   $('#cancel-export').hidden = job.state !== 'running';
-  $('#export-include-project').disabled = job.state === 'running';
   if (job.state === 'complete') {
     $('#export-result').innerHTML = `<a href="/download/${encodeURI(job.result.relativePath)}" download>下载 MOD 安装包</a><p>${escapeHTML(job.result.path)}</p>`;
     $('#start-export').disabled = false;
@@ -2148,12 +2146,10 @@ connect('#export', 'click', async () => {
   await updateExportPlan();
 });
 connect('#start-export', 'click', async () => {
-  const includeProject = $('#export-include-project').checked;
   const name = $('#export-name');
   const packageName = name.value.trim();
   if (!packageName) { name.focus(); throw new Error('请输入安装包名称'); }
   name.disabled = true;
-  $('#export-include-project').disabled = true;
   $('#start-export').disabled = true;
   $('#export-result').textContent = '';
   $('#job-message').textContent = '正在生成当前工程的装配预览';
@@ -2162,13 +2158,11 @@ connect('#start-export', 'click', async () => {
     const request = await capturePreview(state.exportHasAnimation);
     request.packageName = packageName;
     request.scope = 'current';
-    request.includeProject = includeProject;
     const job = await api('/api/export', request);
     state.jobId = job.jobId;
     await pollJob();
   } catch (error) {
     name.disabled = false;
-    $('#export-include-project').disabled = false;
     $('#start-export').disabled = false;
     $('#export-result').textContent = error.message;
     throw error;

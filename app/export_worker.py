@@ -17,7 +17,7 @@ def main():
 
     def cancelled():
         if (folder / "cancel").exists():
-            raise InterruptedError("导出已取消，工程备份和有效缓存已保留")
+            raise InterruptedError("导出已取消，当前工程和有效缓存可继续使用")
 
     def progress(stage, message, fraction):
         state.update(stage=stage, message=message, updatedAt=time.time())

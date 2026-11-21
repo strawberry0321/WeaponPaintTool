@@ -57,6 +57,11 @@ def build_mip(planes, size):
                             axis=2), 0, 1)
 
 
+def mip_layout(width, height, count, fmt):
+    block_bytes = 8 if fmt in (71, 72, 80) else 16
+    dimensions = [(max(1, width >> mip), max(1, height >> mip)) for mip in range(count)]
+    return [(w, h, ((w + 3) // 4) * ((h + 3) // 4) * block_bytes) for w, h in dimensions]
+
 
 def export_plan(project, scope="current"):
     core.validate_project(project)
@@ -156,7 +161,7 @@ class NativeOutput:
         self.unit_reports = []
         self.source_units = []
         self.hashes = []
-        self.source_copies = set()
+        self.source_resources = {}
         self.surface_by_part = {}
         self.material_cache = {}
         self.texture_cache = {}
@@ -167,16 +172,19 @@ class NativeOutput:
         return self.pack / "native" / kind / f"{identity:016x}.{kind}.main"
 
     def source(self, identity, kind):
+        key = (identity, kind)
+        if key in self.source_resources:
+            return self.source_resources[key]
         path = self.source_path(identity, kind)
         if not path.is_file():
             raise ValueError(f"资产包缺少原生{kind}依赖 {identity:016x}")
         result = []
         for suffix in ("main", "gpu", "stream"):
             source = path.with_suffix("." + suffix)
-            raw = source.read_bytes() if source.exists() else b""
+            exists = source.is_file()
+            raw = source.read_bytes() if exists else b""
             result.append(raw)
-            key = (identity, kind, suffix)
-            if source.exists() and key not in self.source_copies:
+            if exists:
                 target = self.root / "source/extracted/Raw" / f"{identity:016x}.{kind}.{suffix}"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists():
@@ -186,8 +194,8 @@ class NativeOutput:
                     with target.open("xb") as stream:
                         stream.write(raw)
                 self.hashes.append(dict(source=str(source), copy=str(target.relative_to(self.root)), sha256=hashlib.sha256(raw).hexdigest()))
-                self.source_copies.add(key)
-        return result
+        self.source_resources[key] = tuple(result)
+        return self.source_resources[key]
 
     def add(self, identity, kind, main, gpu=b"", stream=b""):
         key = (identity, kind)
@@ -209,25 +217,32 @@ class NativeOutput:
         height, width = struct.unpack_from("<II", main, 204)
         count = struct.unpack_from("<I", main, 220)[0]
         fmt = struct.unpack_from("<I", main, 320)[0]
-        target_size = 8 if pixels.ndim == 1 else min(4096, 1 << math.ceil(math.log2(max(pixels.shape[:2]))))
-        if target_size > max(width, height):
-            old_count = count
-            width = height = target_size
-            count = int(math.log2(target_size)) + 1
+        streamed_mips = struct.unpack_from("<I", main, 8)[0] if original_stream else 0
+        resident_mips = count - streamed_mips
+        dims = (width, height) if solid is not None else tuple(
+            min(4096, 1 << (length - 1).bit_length()) for length in (pixels.shape[1], pixels.shape[0]))
+        if dims != (width, height):
+            width, height = dims
+            count = max(dims).bit_length()
+            if count < resident_mips:
+                raise ValueError("无法保留原生常驻 MIP 的数量")
+            streamed_mips = count - resident_mips if original_stream else 0
+            layout = mip_layout(width, height, count, fmt)
             header = bytearray(main)
             struct.pack_into("<II", header, 204, height, width)
-            block_bytes = 8 if fmt in (71, 72, 80) else 16
-            struct.pack_into("<I", header, 212, max(1, (width + 3) // 4) * max(1, (height + 3) // 4) * block_bytes)
+            struct.pack_into("<I", header, 212, layout[0][2])
             struct.pack_into("<I", header, 220, count)
-            sizes = [max(1, (max(1, width >> mip) + 3) // 4) * max(1, (max(1, height >> mip) + 3) // 4) * block_bytes for mip in range(count)]
             header[12:192] = bytes(180)
-            offset = 0
-            for mip, length in enumerate(sizes):
-                struct.pack_into("<IIHH", header, 12 + mip * 12, offset, sum(sizes[mip:]), max(1, width >> mip), max(1, height >> mip))
+            offset, remaining = 0, sum(length for _, _, length in layout)
+            for mip, (w, h, length) in enumerate(layout):
+                struct.pack_into("<IIHH", header, 12 + mip * 12, offset, remaining, w, h)
                 offset += length
+                remaining -= length
             if original_stream:
-                struct.pack_into("<I", header, 8, struct.unpack_from("<I", main, 8)[0] + count - old_count)
+                struct.pack_into("<I", header, 8, streamed_mips)
             main = bytes(header)
+        else:
+            layout = mip_layout(width, height, count, fmt)
         if solid is not None:
             if len(solid) == 3:
                 solid = np.append(solid, 1.)
@@ -236,9 +251,12 @@ class NativeOutput:
             if pixels.shape[2] == 3:
                 pixels = np.concatenate((pixels, np.ones((*pixels.shape[:2], 1))), axis=2)
             source = pixels.astype(np.float32, copy=False)
-            resized = list(worker_pool().map(lambda channel: np.asarray(
-                Image.fromarray(source[:, :, channel]).resize((width, height), Image.Resampling.BILINEAR)), range(4)))
-            pixels = np.clip(np.stack(resized, axis=2), 0, 1)
+            if source.shape[:2] == (height, width):
+                pixels = np.clip(source, 0, 1)
+            else:
+                resized = list(worker_pool().map(lambda channel: np.asarray(
+                    Image.fromarray(source[:, :, channel]).resize((width, height), Image.Resampling.BILINEAR)), range(4)))
+                pixels = np.clip(np.stack(resized, axis=2), 0, 1)
         digest = hashlib.sha256(main)
         digest.update(memoryview(np.ascontiguousarray(pixels, dtype="<f4")))
         digest.update(b"weapon-encoder-1" if solid is None else b"weapon-encoder-1-solid")
@@ -246,23 +264,24 @@ class NativeOutput:
         cache = core.DATA / "cache/dds" / (cache_key + ".dds")
         meta = cache.with_suffix(".json")
         cached = False
+        dds = None
         if cache.is_file() and meta.is_file():
             try:
-                cached = core.file_hash(cache) == json.loads(meta.read_text(encoding="utf-8")).get("sha256")
+                candidate = cache.read_bytes()
+                if hashlib.sha256(candidate).hexdigest() == json.loads(meta.read_text(encoding="utf-8")).get("sha256"):
+                    dds = candidate
+                    cached = True
             except (OSError, ValueError, TypeError):
                 cached = False
-        if cached:
-            dds = cache.read_bytes()
-        else:
+        if not cached:
             self.cancel()
             if solid is not None:
                 block = encode_mip(np.broadcast_to(pixels, (4, 4, 4)), fmt)
-                buffers = [block * (((max(1, width >> mip) + 3) // 4) *
-                                    ((max(1, height >> mip) + 3) // 4)) for mip in range(count)]
+                buffers = [block * (length // len(block)) for _, _, length in layout]
             else:
                 pool = worker_pool()
                 planes = channel_planes(pixels)
-                mips = list(pool.map(lambda mip: build_mip(planes, (max(1, width >> mip), max(1, height >> mip))), range(count)))
+                mips = [pixels] + list(pool.map(lambda level: build_mip(planes, level[:2]), layout[1:]))
                 prepared = [prepare_mip(values, fmt) for values in mips]
                 tasks = []
                 for mip in range(count):
@@ -280,36 +299,19 @@ class NativeOutput:
             core.atomic_write(cache, dds)
             core.atomic_write(meta, core.json_bytes(dict(sha256=hashlib.sha256(dds).hexdigest())))
         self.cancel()
-        spans = []
-        offset = 148
-        for mip in range(count):
-            w, h = max(1, width >> mip), max(1, height >> mip)
-            length = max(1, (w + 3) // 4) * max(1, (h + 3) // 4) * (8 if fmt in (71, 72, 80) else 16)
-            spans.append((offset, length, w, h))
-            offset += length
-        if offset != len(dds):
+        if 148 + sum(length for _, _, length in layout) != len(dds):
             raise ValueError("DDS MIP 长度错误")
-
-        def readback(span):
-            start, length, w, h = span
-            header = bytearray(dds[:148])
-            struct.pack_into("<II", header, 12, h, w)
-            struct.pack_into("<I", header, 28, 1)
-            decoded = Image.open(io.BytesIO(bytes(header) + dds[start:start + length]))
-            decoded.load()
-            if decoded.size != (w, h):
-                raise ValueError("DDS MIP 回读尺寸错误")
-
-        list(worker_pool().map(readback, spans))
-        identity = hash64("content/mods/weaponpaint/texture/" + hashlib.sha256(dds).hexdigest())
+        dds_hash = hashlib.sha256(dds).hexdigest()
+        identity = hash64("content/mods/weaponpaint/texture/" + dds_hash)
         body = dds[148:]
-        gpu = (body[-len(original_gpu):] if original_stream else body) if original_gpu else b""
+        resident_bytes = sum(length for _, _, length in layout[streamed_mips:])
+        gpu = (body[-resident_bytes:] if original_stream else body) if original_gpu else b""
         stream = body if original_stream else b""
         if not stream and len(gpu) != len(body):
             raise ValueError("纹理模板的常驻 MIP 长度不匹配")
         self.add(identity, TEXTURE, main, gpu, stream)
         self.texture_reports.append(dict(id=f"0x{identity:016x}", label=label, mipCount=count, format=fmt,
-                                         width=width, height=height, decodedAllMips=True, cacheHit=cached, sha256=hashlib.sha256(dds).hexdigest()))
+                                         width=width, height=height, decodedAllMips=False, cacheHit=cached, sha256=dds_hash))
         self.texture_cache[memory_key] = identity
         return identity
 
@@ -433,7 +435,7 @@ class NativeOutput:
                                    previewMaterial=original_materials.get(material, material)))
                 start += count
             fitted = dict(part, materialGroups=groups)
-            baked = baker.surfaces(fitted, self.project, 1024, self.cancel, native_motion=True,
+            baked = baker.surfaces(fitted, self.project, 512, self.cancel, native_motion=True,
                                    geometry=(positions, uvs, refs))
             for ref in refs:
                 assignments[tuple(map(int, ref))] = None
@@ -724,7 +726,7 @@ class NativeOutput:
             rows.append(row)
             pm, ps, pg = pm + row[7], ps + row[8], pg + row[9]
             rm, rg = rm + native.align(row[7], 256), rg + native.align(row[9], 256)
-        main, stream, gpu = bytearray(native.align(pm)), bytearray(ps), bytearray(pg)
+        main = bytearray(native.align(pm))
         main[:72] = gzip.decompress((core.APP / "engine/boot_header.gz").read_bytes())
         struct.pack_into("<II", main, 4, len(types), len(resources))
         struct.pack_into("<QQ", main, 32, rm, rg)
@@ -735,13 +737,18 @@ class NativeOutput:
             main[72 + index * 32:104 + index * 32] = block
         for index, (resource, row) in enumerate(zip(resources, rows)):
             struct.pack_into("<7Q6I", main, start + index * 80, *row)
-            for buffer, key, offset in ((main, "main", row[2]), (stream, "stream", row[3]), (gpu, "gpu", row[4])):
-                buffer[offset:offset + len(resource[key])] = resource[key]
-        report = validate_archive(main, stream, gpu)
+            main[row[2]:row[2] + len(resource["main"])] = resource["main"]
         package = self.root / "package"
         package.mkdir(exist_ok=True)
-        for name, raw in ((PATCH, main), (PATCH + ".stream", stream), (PATCH + ".gpu_resources", gpu)):
-            core.atomic_write(package / name, raw)
+        core.atomic_write(package / PATCH, main)
+        for key, column, suffix in (("stream", 3, ".stream"), ("gpu", 4, ".gpu_resources")):
+            with (package / (PATCH + suffix)).open("wb") as target:
+                for resource, row in zip(resources, rows, strict=True):
+                    self.cancel()
+                    target.write(bytes(row[column] - target.tell()))
+                    target.write(resource[key])
+        report = validate_archive(main, (package / (PATCH + ".stream")).stat().st_size,
+                                  (package / (PATCH + ".gpu_resources")).stat().st_size)
         core.atomic_write(self.root / "reports/archive_layout.json", core.json_bytes(report))
         return package
 
@@ -783,31 +790,23 @@ def execute(request, root, progress, cancel):
 
 def build(request, root, destination, version, plan, progress, cancel, *, output_factory=NativeOutput):
     project = request["project"]
-    include_project = request.get("includeProject") is True
-    for directory in ("source", "reports", "previews", "work", "textures", "package"):
+    for directory in ("source", "reports", "work", "textures", "package"):
         (root / directory).mkdir(parents=True, exist_ok=True)
-    progress("backup", "保存完整工程快照", .02)
-    snapshot = request.get("snapshot")
-    project_file = root / "project.hd2project"
-    if snapshot and Path(snapshot).is_file():
-        shutil.copyfile(snapshot, project_file)
-    else:
-        core.atomic_write(project_file, core.project_bytes(project))
-    progress("backup", "校验工程快照与内嵌资产", .05)
-    with zipfile.ZipFile(project_file) as archive:
-        archived_project, _, _, _ = core.inspect_project_archive(archive)
-    if any(archived_project[key] != project[key] for key in ("projectId", "revision")):
-        raise ValueError("工程快照与导出版本不一致")
-    project_hash = core.file_hash(project_file) if include_project else None
+    progress("inputs", "核对工程版本与图片素材", .05)
+    for identity in core.project_image_hashes(project):
+        cancel()
+        if core.file_hash(core.image_path(identity)) != identity:
+            raise ValueError("工程引用的图片哈希不一致，请重新导入该素材")
     core.atomic_write(root / "reports/export_plan.json", core.json_bytes(plan))
-    preview = request.get("preview", "")
+    preview = request.get("preview") or ""
     import base64
-    preview = base64.b64decode(preview.split(",")[-1], validate=True)
-    image = Image.open(io.BytesIO(preview))
-    image.load()
-    if image.format != "PNG" or image.width < 320 or image.height < 200 or request.get("previewRevision") != project["revision"]:
+    if not preview or request.get("previewRevision") != project["revision"]:
         raise ValueError("请从当前工程重新生成装配预览")
-    core.atomic_write(root / "previews/preview.png", preview)
+    preview = base64.b64decode(preview.split(",")[-1], validate=True)
+    with Image.open(io.BytesIO(preview)) as image:
+        image.load()
+        if image.format != "PNG" or image.width < 320 or image.height < 200:
+            raise ValueError("请从当前工程重新生成装配预览")
     target_ids = {part["instanceId"] for part in plan["parts"]}
     native_output = output_factory(root, project, progress, cancel)
     for item in plan["removedAttachments"]:
@@ -825,7 +824,7 @@ def build(request, root, destination, version, plan, progress, cancel, *, output
         progress("baking", "处理原生 Unit " + unit_id, .08 + .67 * index / max(len(units), 1))
         native_output.build_unit(unit_id, parts, output_id)
     progress("native", "写入原生补丁", .79)
-    package = native_output.archive()
+    native_output.archive()
     plan["exportedAnimations"] = [dict(layerId=identity, mode=mode) for identity, mode in plan["animatedLayers"].items()
                                   if identity in native_output.motion_layers]
     plan["uncoveredAnimations"] = sorted(set(plan["animatedLayers"]) - native_output.motion_layers)
@@ -833,6 +832,7 @@ def build(request, root, destination, version, plan, progress, cancel, *, output
                        ("texture_encoding", native_output.texture_reports), ("unit_replacement", native_output.unit_reports),
                        ("source_manifest", native_output.hashes)):
         core.atomic_write(root / "reports" / (name + ".json"), core.json_bytes(data))
+    native_output.resources.clear()
     cancel()
     progress("readback", "独立解析原生补丁与全部 MIP", .86)
     verifier = core.APP / "engine/verify_weapon.exe"
@@ -849,26 +849,26 @@ def build(request, root, destination, version, plan, progress, cancel, *, output
         raise
     if process.returncode:
         raise ValueError("原生独立回读失败 " + stderr.decode("utf-8", "replace")[-3000:])
+    for item in native_output.texture_reports:
+        item["decodedAllMips"] = True
+    core.atomic_write(root / "reports/texture_encoding.json", core.json_bytes(native_output.texture_reports))
     cancel()
     progress("packaging", "校验预览、来源和安装包", .95)
-    return package_verified_export(request, root, destination, version, plan, preview, project_hash, native_output.hashes, cancel)
+    return package_verified_export(request, root, destination, version, plan, preview, native_output.hashes, cancel)
 
 
-def package_verified_export(request, root, destination, version, plan, preview, project_hash, source_hashes, cancel):
+def package_verified_export(request, root, destination, version, plan, preview, source_hashes, cancel):
     project = request["project"]
-    include_project = request.get("includeProject") is True
-    project_file = root / "project.hd2project"
     package = root / "package"
-    patch_hashes = {path.name: core.file_hash(path) for path in package.iterdir()}
+    patches = (PATCH, PATCH + ".stream", PATCH + ".gpu_resources")
+    patch_hashes = {name: core.file_hash(package / name) for name in patches}
     core.atomic_write(package / "preview.png", preview)
-    if include_project:
-        shutil.copy2(project_file, package / "project.hd2project")
     manifest = dict(format="HD2WeaponPaintMod", softwareVersion=core.VERSION, projectId=project["projectId"],
                     revision=project["revision"], assetLocks=project["assetLocks"], scope=plan["scope"],
                     nativeUnits=plan["nativeUnits"], sharedImpact=plan["sharedImpact"], ejectedCasings=plan["ejectedCasings"],
                     selectedAttachments=plan["selectedAttachments"], patchHashes=patch_hashes,
                     previewSource="离线工作台预览", validation="independent_native_readback", gameTested=False,
-                    editableProjectIncluded=include_project)
+                    editableProjectIncluded=False)
     if plan.get("nativeTrial"):
         manifest["nativeTrial"] = plan["nativeTrial"]
     if plan["animatedLayers"]:
@@ -882,36 +882,39 @@ def package_verified_export(request, root, destination, version, plan, preview, 
         instructions += "此包用于 SMG-32 训斥的后握把发光测试。对照包与呼吸包应轮流启用。预览展示亮灯时的部件与颜色。\n"
     if plan["exportedAnimations"]:
         instructions += "在任务中观察原生流光与呼吸灯。军械库和包内 PNG 展示亮灯外观。\n"
-    if include_project:
-        instructions += "打开 project.hd2project 可以继续编辑。\n"
     core.atomic_write(package / "使用说明.txt", instructions.encode("utf-8-sig"))
     custom_name = package_name(request.get("packageName"))
     archive_name = (custom_name or core.safe_name(project["name"]) + "_" + version) + ".zip"
     pending = root / (archive_name + ".pending")
-    stored = {"project.hd2project"}
-    with zipfile.ZipFile(pending, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as archive:
-        for path in sorted(package.iterdir()):
+    members = (*patches, "preview.png", "mod_manifest.json", "使用说明.txt")
+    with zipfile.ZipFile(pending, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=3, allowZip64=True) as archive:
+        for name in sorted(members):
             cancel()
-            info = zipfile.ZipInfo(path.name, core.ZIP_TIME)
-            info.compress_type = zipfile.ZIP_STORED if path.name in stored else zipfile.ZIP_DEFLATED
+            path = package / name
+            info = zipfile.ZipInfo(name, core.ZIP_TIME)
+            info.file_size = path.stat().st_size
+            info.compress_type = zipfile.ZIP_DEFLATED
             info._compresslevel = 3
             info.external_attr = 0o644 << 16
-            with archive.open(info, "w") as target, path.open("rb") as source:
-                shutil.copyfileobj(source, target, 1 << 22)
+            with archive.open(info, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as target, path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1 << 22), b""):
+                    cancel()
+                    target.write(chunk)
     with zipfile.ZipFile(pending) as archive:
-        if archive.testzip():
-            raise ValueError("最终 ZIP 校验失败")
-        preview_image = Image.open(io.BytesIO(archive.read("preview.png")))
-        preview_image.load()
-        for member, expected in patch_hashes.items():
-            if hashlib.sha256(archive.read(member)).hexdigest() != expected:
-                raise ValueError("打包后补丁哈希不一致")
-        if ("project.hd2project" in archive.namelist()) != include_project:
-            raise ValueError("安装包的工程附件与导出选项不一致")
-        if include_project:
-            with archive.open("project.hd2project") as member:
-                if hashlib.file_digest(member, "sha256").hexdigest() != project_hash:
-                    raise ValueError("打包后工程附件哈希不一致")
+        if sorted(archive.namelist()) != sorted(members):
+            raise ValueError("安装包文件清单不一致")
+        with Image.open(io.BytesIO(archive.read("preview.png"))) as preview_image:
+            preview_image.load()
+            if preview_image.format != "PNG":
+                raise ValueError("安装包预览格式不一致")
+        for member in members:
+            cancel()
+            if member in patch_hashes:
+                with archive.open(member) as handle:
+                    if hashlib.file_digest(handle, "sha256").hexdigest() != patch_hashes[member]:
+                        raise ValueError("打包后补丁哈希不一致")
+            elif member != "preview.png":
+                archive.read(member)
     for row in source_hashes:
         if core.file_hash(row["source"]) != row["sha256"] or core.file_hash(root / row["copy"]) != row["sha256"]:
             raise ValueError("制作来源哈希发生变化")
@@ -923,7 +926,8 @@ def package_verified_export(request, root, destination, version, plan, preview, 
     # Only the verified archive crosses into the version directory; every intermediate file dies with root.
     shutil.move(str(pending), str(final))
     report = dict(status="passed", zipPath=str(final), pngDecoded=True, patchHashesPreserved=True,
-                  projectReopened=True, projectIncluded=include_project, sourceHashesUnchanged=True, gameTested=False)
+                  projectIncluded=False, sourceHashesUnchanged=True, gameTested=False,
+                  patchBytes=sum((package / member).stat().st_size for member in patches), zipBytes=final.stat().st_size)
     core.atomic_write(root / "reports/delivery_audit.json", core.json_bytes(report))
     return dict(path=str(final), relativePath=final.relative_to(core.INSTALL).as_posix(),
                 revision=project["revision"], audit=report)

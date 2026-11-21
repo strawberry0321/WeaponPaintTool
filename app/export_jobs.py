@@ -64,7 +64,6 @@ def start(data):
         raise ValueError("\n".join(row["message"] for row in plan["issues"]) or "请选择导出目标")
     package_name(data.get("packageName"))
     core.autosave(project)
-    backup = core.save_project(project, "backups")
     purge_staging()
     with LOCK:
         folder = core.EXPORT_ROOT / core.safe_name(project["name"])
@@ -75,11 +74,12 @@ def start(data):
         staging = staging_path(identity)
         staging.mkdir(parents=True)
         # The worker builds every intermediate file in `staging`; only the finished archive reaches `root`.
-        request = dict(data, project=project, output=str(staging), destination=str(root),
-                       jobId=identity, snapshot=backup["path"])
+        request = dict(project=project, scope=plan["scope"], preview=data.get("preview"),
+                       previewRevision=data.get("previewRevision"), packageName=data.get("packageName"),
+                       output=str(staging), destination=str(root), jobId=identity)
         core.atomic_write(job / "request.json", core.json_bytes(request))
-        state = dict(jobId=identity, state="running", stage="queued", message="工程已备份，正在准备导出", progress=0,
-                     startedAt=time.time(), projectRevision=project["revision"], backup=backup, output=str(root),
+        state = dict(jobId=identity, state="running", stage="queued", message="已记录当前工程，正在准备导出", progress=0,
+                     startedAt=time.time(), projectRevision=project["revision"], output=str(root),
                      work=str(staging))
         core.atomic_write(job / "status.json", core.json_bytes(state))
         reports = core.DATA / "reports" / identity
@@ -116,7 +116,7 @@ def snapshot(identity=None):
     with LOCK:
         owned = JOBS.get(identity)
         if state["state"] == "running" and (owned is None or owned[0].poll() is not None):
-            state.update(state="interrupted", message="导出进程已中断，工程备份已保留，可重新导出", finishedAt=time.time())
+            state.update(state="interrupted", message="导出进程已中断，可以用当前工程重新导出", finishedAt=time.time())
             core.atomic_write(path, core.json_bytes(state))
             discard_work(state)
         if owned and owned[0].poll() is not None:

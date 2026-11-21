@@ -493,14 +493,14 @@ def surfaces(part, project, size=512, cancel=lambda: None, for_preview=False, ma
             if serial % 128 == 0:
                 cancel()
             chosen = None
-            pixels = triangle_pixels(uvs[triangle], min(size, 192)) if partition_uv else []
+            pixels = [(x, y, barycentric @ positions[triangle])
+                      for x, y, barycentric in triangle_pixels(uvs[triangle], min(size, 192))] if partition_uv else []
             for candidate in bins:
                 conflict = False
-                for x, y, barycentric in pixels:
+                for x, y, sample in pixels:
                     old = candidate["occupancy"][y, x]
-                    sample = barycentric @ positions[triangle]
                     occupied = np.isfinite(old[:, 0])
-                    if np.any(occupied & (np.linalg.norm(np.nan_to_num(old) - sample, axis=1) > .001)):
+                    if occupied.any() and np.any(np.linalg.norm(old[occupied] - sample[occupied], axis=1) > .001):
                         conflict = True
                         break
                 if not conflict:
@@ -510,8 +510,8 @@ def surfaces(part, project, size=512, cancel=lambda: None, for_preview=False, ma
                 chosen = dict(triangles=[], occupancy=np.full((min(size, 192), min(size, 192), 3), np.nan, dtype=np.float32))
                 bins.append(chosen)
             chosen["triangles"].append(triangle)
-            for x, y, barycentric in pixels:
-                chosen["occupancy"][y, x] = barycentric @ positions[triangle]
+            for x, y, sample in pixels:
+                chosen["occupancy"][y, x] = sample
         for bin_index, partition in enumerate(bins):
             cancel()
             surface_layers = [layer for layer in layers if np.any(masks[layer['layerId']][partition['triangles']])]
@@ -545,11 +545,12 @@ def surfaces(part, project, size=512, cancel=lambda: None, for_preview=False, ma
             for serial, triangle in enumerate(partition["triangles"]):
                 if serial % 128 == 0:
                     cancel()
+                triangle_layers = [layer for layer in surface_layers if masks[layer["layerId"]][triangle]]
                 for x, y, barycentric in triangle_pixels(uvs[triangle], surface_size):
                     points = barycentric @ assembled[triangle]
                     original = None if surface_opaque else original_values(part, triangle, barycentric @ uvs[triangle], native_root)
                     rgb, light, values = evaluate(points, np.tile(normals[triangle], (len(points), 1)), barycentric,
-                                                   triangle, part, surface_layers, images, seconds=seconds, original=original,
+                                                   triangle, part, triangle_layers, images, seconds=seconds, original=original,
                                                    animated_slots=animated_slots, prepared_brushes=prepared_brushes)
                     base[y, x], parameters[y, x] = rgb, values
                     emission[y, x] = light[0] if animated else light

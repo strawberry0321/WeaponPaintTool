@@ -21,14 +21,17 @@ def validate_archive(main,stream,gpu):
             require(files[index][1]==t[2],f'第 {index+1} 项未处于声明的资源类型分组')
         blocks.append(dict(type=f'0x{t[2]:016x}',start=cursor,count=t[3]));cursor+=t[3]
     require(len({r[:2] for r in files})==nf,'资源编号重复')
+    section_sizes = [len(main), stream if isinstance(stream, int) else len(stream), gpu if isinstance(gpu, int) else len(gpu)]
     previous=[table_end,0,0]
     for i,row in enumerate(files):
         require(row[12]==i+1,'资源顺序索引不连续')
         for a in row[10:12]:require(a>0 and a&(a-1)==0,'资源对齐无效')
         require(row[2]%row[10]==0 and row[4]%row[11]==0,'资源起始地址未对齐')
-        for channel,buf in enumerate([main,stream,gpu]):
+        for channel,length in enumerate(section_sizes):
             off,size=row[2+channel],row[7+channel]
-            require(off+size<=len(buf),'资源越过容器边界')
+            require(off+size<=length,'资源越过容器边界')
             require(off>=previous[channel],'资源内容发生重叠')
             previous[channel]=off+size
-    return dict(status='passed',type_blocks_contiguous=True,resource_count=nf,type_count=nt,blocks=blocks,resource_indices_contiguous=True,resource_bounds_and_alignment_valid=True)
+    return dict(status='passed',type_blocks_contiguous=True,resource_count=nf,type_count=nt,blocks=blocks,
+                resource_indices_contiguous=True,resource_bounds_and_alignment_valid=True,
+                section_bytes=dict(zip(('main', 'stream', 'gpu'), section_sizes)))
